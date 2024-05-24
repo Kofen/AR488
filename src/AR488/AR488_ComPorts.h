@@ -48,16 +48,16 @@ private:
 
 #ifdef DATAPORT_ENABLE
 
-  extern Stream& dataPort;
+  extern Stream* dataPort;
   void startDataPort();
-
+  
   #define DATAPORT_START() startDataPort()
-  #define DATA_RAW_PRINT(str) dataPort.print(str)
-  #define DATA_RAW_PRINTLN(str) dataPort.println(str)
+  #define DATA_RAW_PRINT(str) dataPort->print(str)
+  #define DATA_RAW_PRINTLN(str) dataPort->println(str)
 
 #else
 
-  extern Stream& dataPort;
+  extern Stream* dataPort;
 
   #define DATAPORT_START()
   #define DATA_RAW_PRINT(str)
@@ -65,8 +65,8 @@ private:
 
 #endif  // DATAPORT_ENABLE
 
-
-
+void maintainDataPort();  //
+                          //
 #ifdef DEBUG_ENABLE
 
   extern Stream& debugPort;
@@ -78,14 +78,14 @@ private:
     const char * filename = (strrchr(filestr, '/') ? strrchr(filestr, '/') + 1 : filestr);
 //    funcstr[strrchr(funcstr,'(')] = '\0';
 //    const char * function = strrchr(funcstr,' ') + 1;
-    dataPort.print(filename);
-    dataPort.print(':');
-    dataPort.print(line);
-    dataPort.print(" (");
-    dataPort.print(function);
-    dataPort.print(") > ");
-    dataPort.print(msg1);
-    dataPort.println(msg2);
+    dataPort->print(filename);
+    dataPort->print(':');
+    dataPort->print(line);
+    dataPort->print(" (");
+    dataPort->print(function);
+    dataPort->print(") > ");
+    dataPort->print(msg1);
+    dataPort->println(msg2);
   }
 
   void printHex(uint8_t byteval);

@@ -219,7 +219,6 @@ public:
   bool addressDevice(uint8_t addr, bool dir);
   bool unAddressDevice();
   bool haveAddressedDevice();
-
 private:
 
   bool txBreak;  // Signal to break the GPIB transmission

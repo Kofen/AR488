@@ -13,6 +13,8 @@
 #include "AR488_ComPorts.h"
 #include "AR488_Eeprom.h"
 
+#include "24AA256UID.h"
+#include "AR488_EthernetStream.h"
 
 /***** FWVER "AR488 GPIB controller, ver. 0.51.29, 18/03/2024" *****/
 
@@ -211,6 +213,9 @@ static const char cmdHelp[] PROGMEM = {
 
 /****** Global variables with volatile values related to controller state *****/
 
+// External EEPROM with MAC and unique ID.
+_24AA256UID eeprom(0x50, true);
+
 // GPIB bus object
 GPIBbus gpibBus;
 
@@ -275,6 +280,7 @@ bool sendIdn = false;
 /***** vvvvvvvvvvvvvvvvvvv *****/
 
 
+
 /******  Arduino standard SETUP procedure *****/
 void setup() {
 
@@ -304,8 +310,8 @@ void setup() {
   // Initialise parse buffer
   flushPbuf();
 
-  // Initialise serial at the configured baud rate
-  AR_SERIAL_PORT.begin(AR_SERIAL_SPEED);
+  // Initialise dataport, serial or ethernet as defined
+  startDataPort();
 
 #ifdef DEBUG_ENABLE
   // Initialise debug port
@@ -409,15 +415,39 @@ void setup() {
 #endif
 
 #ifdef SAY_HELLO
-  dataPort.print(F("AR488 ready "));
+  dataPort->print(F("AR488 ready "));
   if (gpibBus.isController()){
-    dataPort.println(F("(controller)."));
+    dataPort->println(F("(controller)."));
   }else{
-    dataPort.println(F("(device)."));
+    dataPort->println(F("(device)."));
   }
 #endif
 
-  dataPort.flush();
+  //Debug I2C
+  uint8_t mac[6];
+  uint8_t sn[4];
+  eeprom.begin();
+  eeprom.getMACAddress(mac); //Fetch the mac from the I2C EEPROM 
+  eeprom.getUniqueID(sn); //Fetch the mac from the I2C EEPROM 
+  
+  // Debug only
+  dataPort->print("MAC Address: ");
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) dataPort->print(":");
+       dataPort->print(mac[i], HEX);
+      }
+  dataPort->println();
+  
+  dataPort->print("Unique ID: ");
+  for (int i = 0; i < 4; i++) {
+    if (i > 0) dataPort->print(":");
+       dataPort->print(sn[i], HEX);
+      }
+  dataPort->println();
+
+
+  dataPort->flush();
+
 
 }
 /****** End of Arduino standard SETUP procedure *****/
@@ -427,7 +457,7 @@ void setup() {
 void loop() {
 
   bool errFlg = false; 
-
+  maintainDataPort();  // Maintain the data port connection
 /*** Macros ***/
 /*
  * Run the startup macro if enabled
@@ -476,11 +506,11 @@ if (lnRdy>0){
       sendToInstrument(pBuf, pbPtr);
       // Auto-read data from GPIB bus following any command
       if (gpibBus.cfg.amode == 1) {
-        errFlg = gpibBus.receiveData(dataPort, gpibBus.cfg.eoi, false, 0);
+        errFlg = gpibBus.receiveData(*dataPort, gpibBus.cfg.eoi, false, 0);
       }
       // Auto-receive data from GPIB bus following a query command
       if (gpibBus.cfg.amode == 2 && isQuery) {
-        errFlg = gpibBus.receiveData(dataPort, gpibBus.cfg.eoi, false, 0);
+        errFlg = gpibBus.receiveData(*dataPort, gpibBus.cfg.eoi, false, 0);
         isQuery = false;
       }
     }
@@ -494,7 +524,7 @@ if (lnRdy>0){
     if ((gpibBus.cfg.amode==3) && autoRead) {
       // Nothing is waiting on the serial input so read data from GPIB
       if (lnRdy==0) {
-        errFlg = gpibBus.receiveData(dataPort, readWithEoi, readWithEndByte, endByte);
+        errFlg = gpibBus.receiveData(*dataPort, readWithEoi, readWithEndByte, endByte);
       }
 /*      
       else{
@@ -507,7 +537,7 @@ if (lnRdy>0){
 
     // Did we get an error during read?
     if (errFlg && isVerb) {
-      dataPort.println(F("Error while receiving data."));
+      dataPort->println(F("Error while receiving data."));
       errFlg = false;
     }
   }
@@ -538,8 +568,8 @@ if (lnRdy>0){
 
   // IDN query ?
   if (sendIdn) {
-    if (gpibBus.cfg.idn==1) dataPort.println(gpibBus.cfg.sname);
-    if (gpibBus.cfg.idn==2) {dataPort.print(gpibBus.cfg.sname);dataPort.print("-");dataPort.println(gpibBus.cfg.serial);}
+    if (gpibBus.cfg.idn==1) dataPort->println(gpibBus.cfg.sname);
+    if (gpibBus.cfg.idn==2) {dataPort->print(gpibBus.cfg.sname);dataPort->print("-");dataPort->println(gpibBus.cfg.serial);}
     sendIdn = false;
   }
 
@@ -551,7 +581,7 @@ if (lnRdy>0){
 */
 
   // If charaters waiting in the serial input buffer then call handler
-  if (dataPort.available()) lnRdy = serialIn_h();
+  if (dataPort->available()) lnRdy = serialIn_h();
 
   delayMicroseconds(5);
 }
@@ -593,8 +623,8 @@ void initController() {
 uint8_t serialIn_h() {
   uint8_t bufferStatus = 0;
   // Parse serial input until we have detected a line terminator
-  while (dataPort.available() && bufferStatus==0) {   // Parse while characters available and line is not complete
-    bufferStatus = parseInput(dataPort.read());
+  while (dataPort->available() && bufferStatus==0) {   // Parse while characters available and line is not complete
+    bufferStatus = parseInput(dataPort->read());
   }
 
 #ifdef DEBUG_SERIAL_INPUT
@@ -614,7 +644,7 @@ uint8_t serialIn_h() {
 
 /***** Unrecognized command *****/
 void errBadCmd() {
-  dataPort.println(F("Unrecognized command"));
+  dataPort->println(F("Unrecognized command"));
 }
 
 
@@ -625,7 +655,7 @@ uint8_t parseInput(char c) {
 
   // Read until buffer full
   if (pbPtr < PBSIZE) {
-    if (isVerb && c!=LF) dataPort.print(c);  // Humans like to see what they are typing...
+    if (isVerb && c!=LF) dataPort->print(c);  // Humans like to see what they are typing...
     // Actions on specific characters
     switch (c) {
       // Carriage return or newline? Then process the line
@@ -641,7 +671,7 @@ uint8_t parseInput(char c) {
           if (pbPtr == 0) {
             flushPbuf();
             if (isVerb) {
-              dataPort.println();
+              dataPort->println();
               showPrompt();
             }
             return 0;
@@ -703,7 +733,7 @@ uint8_t parseInput(char c) {
   if (pbPtr >= PBSIZE) {
     if (isCmd(pBuf) && !r) {  // Command without terminator and buffer full
       if (isVerb) {
-        dataPort.println(F("ERROR - Command buffer overflow!"));
+        dataPort->println(F("ERROR - Command buffer overflow!"));
       }
       flushPbuf();
     }else{  // Buffer contains data and is full, so process the buffer (send data via GPIB)
@@ -838,7 +868,7 @@ static cmdRec cmdHidx [] = {
 /***** Show a prompt *****/
 void showPrompt() {
   // Print a prompt
-  dataPort.print("> ");
+  dataPort->print("> ");
 }
 
 
@@ -921,7 +951,7 @@ void execCmd(char *buffr, uint8_t dsize) {
 #endif
 
   // Execute the command
-  if (isVerb) dataPort.println(); // Shift output to next line
+  if (isVerb) dataPort->println(); // Shift output to next line
 //  getCmd(line);
   getCmd(buffr);
 
@@ -999,7 +1029,7 @@ void getCmd(char *buffr) {
 #endif
     }else{
       errBadCmd();
-      if (isVerb) dataPort.println(F("getCmd: command not available in this mode."));
+      if (isVerb) dataPort->println(F("getCmd: command not available in this mode."));
     }
   } else {
     // No valid command found
@@ -1040,10 +1070,10 @@ bool notInRange(char *param, uint16_t lowl, uint16_t higl, uint16_t &rval) {
   if (rval < lowl || rval > higl) {
     errBadCmd();
     if (isVerb) {
-      dataPort.print(F("Valid range is between "));
-      dataPort.print(lowl);
-      dataPort.print(F(" and "));
-      dataPort.println(higl);
+      dataPort->print(F("Valid range is between "));
+      dataPort->print(lowl);
+      dataPort->print(F(" and "));
+      dataPort->println(higl);
     }
     return true;
   }
@@ -1115,16 +1145,16 @@ void addr_h(char *params) {
     if (notInRange(params, 1, 30, val)) return;
     if (val == gpibBus.cfg.caddr) {
       errBadCmd();
-      if (isVerb) dataPort.println(F("That is my address! Address of a remote device is required."));
+      if (isVerb) dataPort->println(F("That is my address! Address of a remote device is required."));
       return;
     }
     gpibBus.cfg.paddr = val;
     if (isVerb) {
-      dataPort.print(F("Set device primary address to: "));
-      dataPort.println(val);
+      dataPort->print(F("Set device primary address to: "));
+      dataPort->println(val);
     }
   } else {
-    dataPort.println(gpibBus.cfg.paddr);
+    dataPort->println(gpibBus.cfg.paddr);
   }
 }
 
@@ -1136,12 +1166,12 @@ void rtmo_h(char *params) {
     if (notInRange(params, 1, 32000, val)) return;
     gpibBus.cfg.rtmo = val;
     if (isVerb) {
-      dataPort.print(F("Set [read_tmo_ms] to: "));
-      dataPort.print(val);
-      dataPort.println(F(" milliseconds"));
+      dataPort->print(F("Set [read_tmo_ms] to: "));
+      dataPort->print(val);
+      dataPort->println(F(" milliseconds"));
     }
   } else {
-    dataPort.println(gpibBus.cfg.rtmo);
+    dataPort->println(gpibBus.cfg.rtmo);
   }
 }
 
@@ -1153,11 +1183,11 @@ void eos_h(char *params) {
     if (notInRange(params, 0, 3, val)) return;
     gpibBus.cfg.eos = (uint8_t)val;
     if (isVerb) {
-      dataPort.print(F("Set EOS to: "));
-      dataPort.println(val);
+      dataPort->print(F("Set EOS to: "));
+      dataPort->println(val);
     };
   } else {
-    dataPort.println(gpibBus.cfg.eos);
+    dataPort->println(gpibBus.cfg.eos);
   }
 }
 
@@ -1169,11 +1199,11 @@ void eoi_h(char *params) {
     if (notInRange(params, 0, 1, val)) return;
     gpibBus.cfg.eoi = val ? true : false;
     if (isVerb) {
-      dataPort.print(F("Set EOI assertion: "));
-      dataPort.println(val ? "ON" : "OFF");
+      dataPort->print(F("Set EOI assertion: "));
+      dataPort->println(val ? "ON" : "OFF");
     };
   } else {
-    dataPort.println(gpibBus.cfg.eoi);
+    dataPort->println(gpibBus.cfg.eoi);
   }
 }
 
@@ -1192,11 +1222,11 @@ void cmode_h(char *params) {
         break;
     }
     if (isVerb) {
-      dataPort.print(F("Interface mode set to: "));
-      dataPort.println(val ? "CONTROLLER" : "DEVICE");
+      dataPort->print(F("Interface mode set to: "));
+      dataPort->println(val ? "CONTROLLER" : "DEVICE");
     }
   } else {
-    dataPort.println(gpibBus.isController());
+    dataPort->println(gpibBus.isController());
   }
 }
 
@@ -1208,11 +1238,11 @@ void eot_en_h(char *params) {
     if (notInRange(params, 0, 1, val)) return;
     gpibBus.cfg.eot_en = val ? true : false;
     if (isVerb) {
-      dataPort.print(F("Appending of EOT character: "));
-      dataPort.println(val ? "ON" : "OFF");
+      dataPort->print(F("Appending of EOT character: "));
+      dataPort->println(val ? "ON" : "OFF");
     }
   } else {
-    dataPort.println(gpibBus.cfg.eot_en);
+    dataPort->println(gpibBus.cfg.eot_en);
   }
 }
 
@@ -1224,11 +1254,11 @@ void eot_char_h(char *params) {
     if (notInRange(params, 0, 255, val)) return;
     gpibBus.cfg.eot_ch = (uint8_t)val;
     if (isVerb) {
-      dataPort.print(F("EOT set to ASCII character: "));
-      dataPort.println(val);
+      dataPort->print(F("EOT set to ASCII character: "));
+      dataPort->println(val);
     };
   } else {
-    dataPort.println(gpibBus.cfg.eot_ch, DEC);
+    dataPort->println(gpibBus.cfg.eot_ch, DEC);
   }
 }
 
@@ -1239,17 +1269,17 @@ void amode_h(char *params) {
   if (params != NULL) {
     if (notInRange(params, 0, 3, val)) return;
     if (val > 0 && isVerb) {
-      dataPort.println(F("WARNING: automode ON can cause some devices to generate"));
-      dataPort.println(F("         'addressed to talk but nothing to say' errors"));
+      dataPort->println(F("WARNING: automode ON can cause some devices to generate"));
+      dataPort->println(F("         'addressed to talk but nothing to say' errors"));
     }
     gpibBus.cfg.amode = (uint8_t)val;
     if (gpibBus.cfg.amode < 3) autoRead = false;
     if (isVerb) {
-      dataPort.print(F("Auto mode: "));
-      dataPort.println(gpibBus.cfg.amode);
+      dataPort->print(F("Auto mode: "));
+      dataPort->println(gpibBus.cfg.amode);
     }
   } else {
-    dataPort.println(gpibBus.cfg.amode);
+    dataPort->println(gpibBus.cfg.amode);
   }
 }
 
@@ -1258,13 +1288,13 @@ void amode_h(char *params) {
 void ver_h(char *params) {
   // If "real" requested
   if (params != NULL && strncasecmp(params, "real", 3) == 0) {
-    dataPort.println(F(FWVER));
+    dataPort->println(F(FWVER));
     // Otherwise depends on whether we have a custom string set
   } else {
     if (strlen(gpibBus.cfg.vstr) > 0) {
-      dataPort.println(gpibBus.cfg.vstr);
+      dataPort->println(gpibBus.cfg.vstr);
     } else {
-      dataPort.println(F(FWVER));
+      dataPort->println(F(FWVER));
     }
   }
 }
@@ -1279,7 +1309,7 @@ void read_h(char *params) {
   // Read any parameters
   if (params != NULL) {
     if (strlen(params) > 3) {
-      if (isVerb) dataPort.println(F("Invalid parameter - ignored!"));
+      if (isVerb) dataPort->println(F("Invalid parameter - ignored!"));
     } else if (strncasecmp(params, "eoi", 3) == 0) { // Read with eoi detection
       readWithEoi = true;
     } else { // Assume ASCII character given and convert to an 8 bit byte
@@ -1297,7 +1327,7 @@ void read_h(char *params) {
   } else {
     // If auto mode is disabled we do a single read
     gpibBus.addressDevice(gpibBus.cfg.paddr, TALK);
-    gpibBus.receiveData(dataPort, readWithEoi, readWithEndByte, endByte);
+    gpibBus.receiveData(*dataPort, readWithEoi, readWithEndByte, endByte);
   }
 }
 
@@ -1305,7 +1335,7 @@ void read_h(char *params) {
 /***** Send device clear (usually resets the device to power on state) *****/
 void clr_h() {
   if (gpibBus.sendSDC())  {
-    if (isVerb) dataPort.println(F("Failed to send SDC"));
+    if (isVerb) dataPort->println(F("Failed to send SDC"));
     return;
   }
   // Set GPIB controls back to idle state
@@ -1322,13 +1352,13 @@ void llo_h(char *params) {
     if (params != NULL) {
       if (0 == strncmp(params, "all", 3)) {
         if (gpibBus.sendCmd(GC_LLO)) {
-          if (isVerb) dataPort.println(F("Failed to send universal LLO."));
+          if (isVerb) dataPort->println(F("Failed to send universal LLO."));
         }
       }
     } else {
       // Send LLO to currently addressed device
       if (gpibBus.sendLLO()){
-        if (isVerb) dataPort.println(F("Failed to send LLO!"));
+        if (isVerb) dataPort->println(F("Failed to send LLO!"));
       }
     }
   }
@@ -1349,7 +1379,7 @@ void loc_h(char *params) {
     } else {
       // Send GTL to addressed device
       if (gpibBus.sendGTL()) {
-        if (isVerb) dataPort.println(F("Failed to send LOC!"));
+        if (isVerb) dataPort->println(F("Failed to send LOC!"));
       }
       // Set GPIB controls back to idle state
       gpibBus.setControls(CIDS);
@@ -1370,7 +1400,7 @@ void ifc_h() {
     delayMicroseconds(150);
     // De-assert IFC
     gpibBus.setControlVal(0b00000001, 0b00000001, 0);
-    if (isVerb) dataPort.println(F("IFC signal asserted for 150 microseconds"));
+    if (isVerb) dataPort->println(F("IFC signal asserted for 150 microseconds"));
   }
 }
 
@@ -1412,7 +1442,7 @@ void trg_h(char *params) {
     for (int i = 0; i < cnt; i++) {
       // Sent GET to the requested device
       if (gpibBus.sendGET(addrs[i]))  {
-        if (isVerb) dataPort.println(F("Failed to trigger device!"));
+        if (isVerb) dataPort->println(F("Failed to trigger device!"));
         return;
       }
     }
@@ -1420,7 +1450,7 @@ void trg_h(char *params) {
     // Set GPIB controls back to idle state
     gpibBus.setControls(CIDS);
 
-    if (isVerb) dataPort.println(F("Group trigger completed."));
+    if (isVerb) dataPort->println(F("Group trigger completed."));
   }
 }
 
@@ -1442,7 +1472,7 @@ void rst_h() {
   while (millis() < tout) {};
   // Should never reach here....
   if (isVerb) {
-    dataPort.println(F("Reset FAILED."));
+    dataPort->println(F("Reset FAILED."));
   };
 #elif defined (ESP32)
   ESP.restart();
@@ -1491,7 +1521,7 @@ void spoll_h(char *params) {
       if (strncmp(param, "all", 3) == 0) {
         all = true;
         j = 30;
-        if (isVerb) dataPort.println(F("Serial poll of all devices requested..."));
+        if (isVerb) dataPort->println(F("Serial poll of all devices requested..."));
         break;
       // Valid GPIB address parameter ?
       } else if (strlen(param) < 3) { // No more than 2 characters
@@ -1501,7 +1531,7 @@ void spoll_h(char *params) {
       // Other condition
       } else {
         errBadCmd();
-        if (isVerb) dataPort.println(F("Invalid parameter"));
+        if (isVerb) dataPort->println(F("Invalid parameter"));
         return;
       }
 
@@ -1572,31 +1602,31 @@ void spoll_h(char *params) {
           // If all, return specially formatted response: SRQ:addr,status
           // but only when RQS bit set
           if (sb & 0x40) {
-            dataPort.print(F("SRQ:")); dataPort.print(i); dataPort.print(F(",")); dataPort.println(sb, DEC);
+            dataPort->print(F("SRQ:")); dataPort->print(i); dataPort->print(F(",")); dataPort->println(sb, DEC);
             // Exit on first device to respond
             i = j;
           }
         } else {
           // Return decimal number representing status byte
-          dataPort.println(sb, DEC);
+          dataPort->println(sb, DEC);
           if (isVerb) {
-            dataPort.print(F("Received status byte ["));
-            dataPort.print(sb);
-            dataPort.print(F("] from device at address: "));
-            dataPort.println(addrval);
+            dataPort->print(F("Received status byte ["));
+            dataPort->print(sb);
+            dataPort->print(F("] from device at address: "));
+            dataPort->println(addrval);
           }
           // Exit on first device to respond
           i = j;
         }
       } else {
         if (isVerb) {
-          dataPort.print(F("Failed to retrieve status byte from "));
-          dataPort.println(addrval);
+          dataPort->print(F("Failed to retrieve status byte from "));
+          dataPort->println(addrval);
         }
       }
     }
   }
-  if (all) dataPort.println();
+  if (all) dataPort->println();
 
   // Send Serial Poll Disable [SPD] to all devices
   if ( gpibBus.sendCmd(GC_SPD) )  {
@@ -1625,7 +1655,7 @@ void spoll_h(char *params) {
   // Set GPIB control to controller idle state
   gpibBus.setControls(CIDS);
 
-  if (isVerb) dataPort.println(F("Serial poll completed."));
+  if (isVerb) dataPort->println(F("Serial poll completed."));
 
 }
 
@@ -1634,7 +1664,7 @@ void spoll_h(char *params) {
 void srq_h() {
   //NOTE: LOW=0=asserted, HIGH=1=unasserted
 //  dataPort.println(!digitalRead(SRQ));
-  dataPort.println(gpibBus.isAsserted(SRQ_PIN));
+  dataPort->println(gpibBus.isAsserted(SRQ_PIN));
 }
 
 
@@ -1648,7 +1678,7 @@ void stat_h(char *params) {
     gpibBus.setStatus((uint8_t)statusByte);
   } else {
     // Return the currently set status byte
-    dataPort.println(gpibBus.cfg.stat);
+    dataPort->println(gpibBus.cfg.stat);
   }
 }
 
@@ -1657,9 +1687,9 @@ void stat_h(char *params) {
 void save_h() {
 #ifdef E2END
   epWriteData(gpibBus.cfg.db, GPIB_CFG_SIZE);
-  if (isVerb) dataPort.println(F("Settings saved."));
+  if (isVerb) dataPort->println(F("Settings saved."));
 #else
-  dataPort.println(F("EEPROM not supported."));
+  dataPort->println(F("EEPROM not supported."));
 #endif
 }
 
@@ -1675,11 +1705,11 @@ void lon_h(char *params) {
       isProm = false; // Promiscuous mode must be disabled!
     }
     if (isVerb) {
-      dataPort.print(F("LON: "));
-      dataPort.println(lval ? "ON" : "OFF") ;
+      dataPort->print(F("LON: "));
+      dataPort->println(lval ? "ON" : "OFF") ;
     }
   } else {
-    dataPort.println(isRO);
+    dataPort->println(isRO);
   }
 }
 
@@ -1699,14 +1729,14 @@ void help_h(char *params) {
       if(c == ':') {
         token[i] = 0;
         if((params == NULL) || (strcmp(token, params) == 0)) {
-          dataPort.print(F("++"));
-          dataPort.print(token);
-          dataPort.print(c);
+          dataPort->print(F("++"));
+          dataPort->print(token);
+          dataPort->print(c);
           k++;
           t = pgm_read_byte_near(cmdHelp + k);
-          dataPort.print(F(" ["));
-          dataPort.print(t);
-          dataPort.print(F("]"));
+          dataPort->print(F(" ["));
+          dataPort->print(t);
+          dataPort->print(F("]"));
           i = 255; // means we need to print until \n
         }
         
@@ -1715,7 +1745,7 @@ void help_h(char *params) {
         i++;
       }
     } else if (i == 255) {
-      dataPort.print(c);
+      dataPort->print(c);
     }
     if (c == '\n') {
       i = 0;
@@ -1749,7 +1779,7 @@ void aspoll_h() {
  */
 void dcl_h() {
   if ( gpibBus.sendCmd(GC_DCL) )  {
-    if (isVerb) dataPort.println(F("Sending DCL failed"));
+    if (isVerb) dataPort->println(F("Sending DCL failed"));
     return;
   }
   // Set GPIB controls back to idle state
@@ -1770,12 +1800,12 @@ void eor_h(char *params) {
     if (notInRange(params, 0, 15, val)) return;
     gpibBus.cfg.eor = (uint8_t)val;
     if (isVerb) {
-      dataPort.print(F("Set EOR to: "));
-      dataPort.println(val);
+      dataPort->print(F("Set EOR to: "));
+      dataPort->println(val);
     };
   } else {
     if (gpibBus.cfg.eor>7) gpibBus.cfg.eor = 0;  // Needed to reset FF read from EEPROM after FW upgrade
-    dataPort.println(gpibBus.cfg.eor);
+    dataPort->println(gpibBus.cfg.eor);
   }
 }
 
@@ -1802,9 +1832,9 @@ void ppoll_h() {
   gpibBus.setControls(CIDS);
 
   // Output the response byte
-  dataPort.println(sb, DEC);
+  dataPort->println(sb, DEC);
 
-  if (isVerb) dataPort.println(F("Parallel poll completed."));
+  if (isVerb) dataPort->println(F("Parallel poll completed."));
 }
 
 
@@ -1812,7 +1842,7 @@ void ppoll_h() {
 void ren_h(char *params) {
 #if defined (SN7516X) && not defined (SN7516X_DC)
   params = params;
-  dataPort.println(F("Unavailable")) ;
+  dataPort->println(F("Unavailable")) ;
 #else
   // char *stat;
   uint16_t val;
@@ -1820,11 +1850,11 @@ void ren_h(char *params) {
     if (notInRange(params, 0, 1, val)) return;
     digitalWrite(REN_PIN, (val ? LOW : HIGH));
     if (isVerb) {
-      dataPort.print(F("REN: "));
-      dataPort.println(val ? "REN asserted" : "REN un-asserted") ;
+      dataPort->print(F("REN: "));
+      dataPort->println(val ? "REN asserted" : "REN un-asserted") ;
     };
   } else {
-    dataPort.println(digitalRead(REN_PIN) ? 0 : 1);
+    dataPort->println(digitalRead(REN_PIN) ? 0 : 1);
   }
 #endif
 }
@@ -1833,8 +1863,8 @@ void ren_h(char *params) {
 /***** Enable verbose mode 0=OFF; 1=ON *****/
 void verb_h() {
   isVerb = !isVerb;
-  dataPort.print("Verbose: ");
-  dataPort.println(isVerb ? "ON" : "OFF");
+  dataPort->print("Verbose: ");
+  dataPort->println(isVerb ? "ON" : "OFF");
 }
 
 
@@ -1880,11 +1910,11 @@ void prom_h(char *params) {
       isRO = false; // Listen-only mode must be disabled!
     }
     if (isVerb) {
-      dataPort.print(F("PROM: "));
-      dataPort.println(pval ? "ON" : "OFF") ;
+      dataPort->print(F("PROM: "));
+      dataPort->println(pval ? "ON" : "OFF") ;
     }
   } else {
-    dataPort.println(isProm);
+    dataPort->println(isProm);
   }
 }
 
@@ -1902,19 +1932,19 @@ void ton_h(char *params) {
     }
   }else{
     if (isVerb) {
-      dataPort.print(F("TON: "));
+      dataPort->print(F("TON: "));
       switch (isTO) {
         case 1:
-          dataPort.println(F("ON unbuffered"));
+          dataPort->println(F("ON unbuffered"));
           break;
         case 2:
-          dataPort.println(F("ON buffered"));
+          dataPort->println(F("ON buffered"));
           break;
         default:
-          dataPort.println(F("OFF"));
+          dataPort->println(F("OFF"));
       }
     }
-    dataPort.println(isTO);
+    dataPort->println(isTO);
   }
 }
 
@@ -1940,9 +1970,9 @@ void srqa_h(char *params) {
         isSrqa = true;
         break;
     }
-    if (isVerb) dataPort.println(isSrqa ? "SRQ auto ON" : "SRQ auto OFF") ;
+    if (isVerb) dataPort->println(isSrqa ? "SRQ auto ON" : "SRQ auto OFF") ;
   } else {
-    dataPort.println(isSrqa);
+    dataPort->println(isSrqa);
   }
 }
 
@@ -1973,16 +2003,16 @@ void repeat_h(char *params) {
         // Send string to instrument
         gpibBus.sendData(param, strlen(param));
         delay(tmdly);
-        gpibBus.receiveData(dataPort, gpibBus.cfg.eoi, false, 0);
+        gpibBus.receiveData(*dataPort, gpibBus.cfg.eoi, false, 0);
       }
     } else {
       errBadCmd();
-      if (isVerb) dataPort.println(F("Missing parameter"));
+      if (isVerb) dataPort->println(F("Missing parameter"));
       return;
     }
   } else {
     errBadCmd();
-    if (isVerb) dataPort.println(F("Missing parameters"));
+    if (isVerb) dataPort->println(F("Missing parameters"));
   }
 
 }
@@ -1996,24 +2026,24 @@ void tct_h(char *params){
     if (notInRange(params, 0, 30, val)) return;
     if (val == gpibBus.cfg.caddr) {
       errBadCmd();
-      if (isVerb) dataPort.println(F("That is my address! Please provide the address of a remote device."));
+      if (isVerb) dataPort->println(F("That is my address! Please provide the address of a remote device."));
       return;
     }
 
     tctfail = gpibBus.sendTCT(val);
 
     if (isVerb) {
-      dataPort.print(F("Sending TCT to device at address "));
-      dataPort.print(val);
+      dataPort->print(F("Sending TCT to device at address "));
+      dataPort->print(val);
     }
     
     if (tctfail) {
-      if (isVerb) dataPort.println(F(" failed!"));
+      if (isVerb) dataPort->println(F(" failed!"));
       return;
     }else{
-      if (isVerb) dataPort.println(F(" succeeded."));
+      if (isVerb) dataPort->println(F(" succeeded."));
       gpibBus.startDeviceMode();
-      if (isVerb) dataPort.println(F("Switched to device mode."));
+      if (isVerb) dataPort->println(F("Switched to device mode."));
     }
   }
 }
@@ -2034,15 +2064,15 @@ void macro_h(char *params) {
       macro = (pgm_read_word(macros + i));
       //      dataPort.print(i);dataPort.print(F(": "));
       if (strlen_P(macro) > 0) {
-        dataPort.print(i);
-        dataPort.print(" ");
+        dataPort->print(i);
+        dataPort->print(" ");
       }
     }
-    dataPort.println();
+    dataPort->println();
   }
 #else
   memset(params, '\0', 5);
-  dataPort.println(F("Disabled"));
+  dataPort->println(F("Disabled"));
 #endif
 }
 
@@ -2075,7 +2105,7 @@ void xdiag_h(char *params){
     if (strlen(param)<4){
       mode = atoi(param);
       if (mode>2) {
-        dataPort.println(F("Invalid: 0=data bus; 1=control bus"));
+        dataPort->println(F("Invalid: 0=data bus; 1=control bus"));
         return;
       }
     }
@@ -2172,9 +2202,9 @@ void id_h(char *params) {
 #endif
           memset(gpibBus.cfg.vstr, '\0', 48);
           strncpy(gpibBus.cfg.vstr, datastr, dlen);
-          if (isVerb) dataPort.print(F("VerStr: "));dataPort.println(gpibBus.cfg.vstr);
+          if (isVerb) dataPort->print(F("VerStr: "));dataPort->println(gpibBus.cfg.vstr);
         }else{
-          if (isVerb) dataPort.println(F("Length of version string must not exceed 48 characters!"));
+          if (isVerb) dataPort->println(F("Length of version string must not exceed 48 characters!"));
           errBadCmd();
         }
         return;
@@ -2184,7 +2214,7 @@ void id_h(char *params) {
           memset(gpibBus.cfg.sname, '\0', 16);
           strncpy(gpibBus.cfg.sname, datastr, dlen);
         }else{
-          if (isVerb) dataPort.println(F("Length of name must not exceed 15 characters!"));
+          if (isVerb) dataPort->println(F("Length of name must not exceed 15 characters!"));
           errBadCmd();
         }
         return;
@@ -2193,7 +2223,7 @@ void id_h(char *params) {
         if (dlen < 10) {
           gpibBus.cfg.serial = atol(datastr);
         }else{
-          if (isVerb) dataPort.println(F("Serial number must not exceed 9 characters!"));
+          if (isVerb) dataPort->println(F("Serial number must not exceed 9 characters!"));
           errBadCmd();
         }
         return;
@@ -2201,22 +2231,22 @@ void id_h(char *params) {
 //      errBadCmd();
     }else{
       if (strncasecmp(keyword, "verstr", 6)==0) {
-        dataPort.println(gpibBus.cfg.vstr);
+        dataPort->println(gpibBus.cfg.vstr);
         return;
       }
       if (strncasecmp(keyword, "fwver", 6)==0) {
-        dataPort.println(F(FWVER));
+        dataPort->println(F(FWVER));
         return;
       }
       if (strncasecmp(keyword, "name", 4)==0) {
-        dataPort.println(gpibBus.cfg.sname);
+        dataPort->println(gpibBus.cfg.sname);
         return;      
       } void addr_h(char *params);
       if (strncasecmp(keyword, "serial", 6)==0) {
         unsigned long int serialnum = gpibBus.cfg.serial;
         memset(serialStr, '\0', 10);
         snprintf(serialStr, 10, "%09lu", serialnum);  // Max str length = 10-1 i.e 9 digits + null terminator 
-        dataPort.println(serialStr);
+        dataPort->println(serialStr);
         return;    
       }
     }
@@ -2234,13 +2264,13 @@ void idn_h(char * params){
     if (notInRange(params, 0, 2, val)) return;
     gpibBus.cfg.idn = (uint8_t)val;
     if (isVerb) {
-      dataPort.print(F("Sending IDN: "));
-      dataPort.print(val ? "Enabled" : "Disabled"); 
-      if (val==2) dataPort.print(F(" with serial number"));
-      dataPort.println();
+      dataPort->print(F("Sending IDN: "));
+      dataPort->print(val ? "Enabled" : "Disabled"); 
+      if (val==2) dataPort->print(F(" with serial number"));
+      dataPort->println();
     };
   } else {
-    dataPort.println(gpibBus.cfg.idn, DEC);
+    dataPort->println(gpibBus.cfg.idn, DEC);
   }  
 }
 
@@ -2248,7 +2278,7 @@ void idn_h(char * params){
 /***** Send device clear (usually resets the device to power on state) *****/
 void sendmla_h() {
   if (gpibBus.sendMLA())  {
-    if (isVerb) dataPort.println(F("Failed to send MLA"));
+    if (isVerb) dataPort->println(F("Failed to send MLA"));
     return;
   }
 }
@@ -2257,7 +2287,7 @@ void sendmla_h() {
 /***** Send device clear (usually resets the device to power on state) *****/
 void sendmta_h() {
   if (gpibBus.sendMTA())  {
-    if (isVerb) dataPort.println(F("Failed to send MTA"));
+    if (isVerb) dataPort->println(F("Failed to send MTA"));
     return;
   }
 }
@@ -2273,7 +2303,7 @@ void sendmsa_h(char *params) {
     if (strlen(param) > 0) {
       if (notInRange(param, 96, 126, saddr)) return;
       if (gpibBus.sendMSA(saddr)){
-        if (isVerb) dataPort.println(F("Failed to send MSA"));
+        if (isVerb) dataPort->println(F("Failed to send MSA"));
         return;
       }
     }
@@ -2292,7 +2322,7 @@ void sendmsa_h(char *params) {
 /***** Send device clear (usually resets the device to power on state) *****/
 void unlisten_h() {
   if (gpibBus.sendUNL())  {
-    if (isVerb) dataPort.println(F("Failed to send UNL"));
+    if (isVerb) dataPort->println(F("Failed to send UNL"));
     return;
   }
   // Set GPIB controls back to idle state
@@ -2304,7 +2334,7 @@ void unlisten_h() {
 /***** Send device clear (usually resets the device to power on state) *****/
 void untalk_h() {
   if (gpibBus.sendUNT())  {
-    if (isVerb) dataPort.println(F("Failed to send UNT"));
+    if (isVerb) dataPort->println(F("Failed to send UNT"));
     return;
   }
   // Set GPIB controls back to idle state
@@ -2596,7 +2626,7 @@ void execGpibCmd(uint8_t gpibcmd){
 /***** Device is addressed to listen - so listen *****/
 void device_listen_h(){
   // Receivedata params: stream, detectEOI, detectEndByte, endByte
-  gpibBus.receiveData(dataPort, false, false, 0x0);
+  gpibBus.receiveData(*dataPort, false, false, 0x0);
 }
 
 
@@ -2615,12 +2645,12 @@ void device_talk_h(){
 /***** Selected Device Clear *****/
 void device_sdc_h() {
   // If being addressed then reset
-  if (isVerb) dataPort.println(F("Resetting..."));
+  if (isVerb) dataPort->println(F("Resetting..."));
 #ifdef DEBUG_DEVICE_ATN
   DB_PRINT(F("Reset adressed to me: "),"");
 #endif
   rst_h();
-  if (isVerb) dataPort.println(F("Reset failed."));
+  if (isVerb) dataPort->println(F("Reset failed."));
 }
 
 
@@ -2713,10 +2743,10 @@ void lonMode(){
   while (isRO) {
 
     state = gpibBus.readByte(&db, false, &eoiDetected);
-    if (state == HANDSHAKE_COMPLETE) dataPort.write(db);
+    if (state == HANDSHAKE_COMPLETE) dataPort->write(db);
 
     // Check whether there are charaters waiting in the serial input buffer and call handler
-    if (dataPort.available()) {
+    if (dataPort->available()) {
 
       lnRdy = serialIn_h();
 
@@ -2745,11 +2775,11 @@ void tonMode(){
   while (isTO>0) {
 
     // Check whether there are charaters waiting in the serial input buffer and call handler
-    if (dataPort.available()) {
+    if (dataPort->available()) {
 
       if (isTO == 1) {
         // Unbuffered version
-        gpibBus.writeByte(dataPort.read(), false);
+        gpibBus.writeByte(dataPort->read(), false);
       }
 
       if (isTO == 2) {

@@ -1,6 +1,12 @@
 # AR488 Arduino GPIB Interface
 
+<h4>This is a fork from Twilight-Logic AR488 GPIB usb interface with the aim of adding ethernet support</h4>
+<h5>Right now ethernet is working and it behaves as a Prologix ethernet adapter, but it is very much a proof of concept, alt lot of proper error and client handeling is missing, use at own risk!</h5>
 
+You must use a mcu with at least 48kB of flash, the code with ethernet compiled is about 38k. The original serial function is maintained and the compiled code still fits all 32k devices. 
+The CS pin for the ethernet shield is hardcoded in the AR488_StreamEthernet.cpp and IP is DHCP, but can be set in AR488_ComPorts.cpp    
+  
+  
 The AR488 GPIB controller is an Arduino-based controller for interfacing with IEEE488 GPIB devices via USB. This work was inspired by and has been based on the work originally released by Emanuele Girlando and has been released with his permission.
 
 This sketch represents a rewrite of that work and implements the full set of Prologix ++ commands in both controller and device mode, with the exception of ++help. Secondary GPIB addressing is not yet supported. A number of additional features are provided, for example, a macro feature is provided to allow automation of frequently used command sequences was well as controller and instrument initialisation at startup. As of version 0.48.x, interfacing with SN75160 and SN75161 GPIB transceiver integrated circuits is supported.

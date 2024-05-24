@@ -67,23 +67,48 @@ int DEVNULL::lastByte()
 /****************************/
 
 #ifdef DATAPORT_ENABLE
-  #ifdef AR_SERIAL_SWPORT
 
-    SoftwareSerial dataPort(SW_SERIAL_RX_PIN, SW_SERIAL_TX_PIN);
+#ifdef AR_ETHERNET_PORT
+  #include "AR488_EthernetStream.h"
+  EthernetStream* ethernetPort = nullptr;
+  #else
+  #ifdef AR_SOFTWARE_SERIAL
+  #include <SoftwareSerial.h>
+  SoftwareSerial swSerial(SW_SERIAL_RX_PIN, SW_SERIAL_TX_PIN);
+  #endif
+#endif
 
-    void startDataPort() {
-      dataPort.begin(AR_SERIAL_SPEED);
-    }
+Stream* dataPort = nullptr;
+
+void startDataPort() {
+  #ifdef AR_ETHERNET_PORT
+    byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED }; // Temporary hard coded MAC
+    IPAddress ip(0, 0, 0, 0); // Same
+    ethernetPort = new EthernetStream(mac, ip, 1234);
+    
+    dataPort = ethernetPort;
+  
+    ethernetPort->begin();
 
   #else
-
-    Stream& dataPort = AR_SERIAL_PORT;
-
-    void startDataPort() {
-      AR_SERIAL_PORT.begin(AR_SERIAL_SPEED);
-    }
-  
+  #ifdef AR_SOFTWARE_SERIAL
+    swSerial.begin(AR_SERIAL_SPEED);
+    dataPort = &swSerial;
+  #else
+    AR_SERIAL_PORT.begin(AR_SERIAL_SPEED);
+    dataPort = &AR_SERIAL_PORT;
   #endif
+  #endif
+}
+
+void maintainDataPort() {
+#ifdef AR_ETHERNET_PORT
+    if (ethernetPort) {
+        ethernetPort->maintain();
+    }
+#endif
+}
+
 
 #else
 
